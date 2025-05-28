@@ -5,135 +5,91 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <time.h>
-
 #include <mpi.h>
 
-// Declare verbose and tag as global variables
-int verbose = 0;
+#define MASTER_PROCESS_ID 0
+
 int tag = 0;
 
-// Function prototypes
-void Compare_and_Send(int myid, int step, int *smaller, int *gotten);
-void Collect_Sorted_Sequence(int myid, int p, int smaller, int *sorted);
+void pass_next(int cpid, int step, int *old, int *new) {
+    if (step == 0) {
+        *old = *new;
+        return;
+    }
+
+    if (*new > *old)
+        MPI_Send(new, 1, MPI_INT, cpid + 1, tag, MPI_COMM_WORLD);
+    else {
+        MPI_Send(old, 1, MPI_INT, cpid + 1, tag, MPI_COMM_WORLD);
+        *old = *new;
+    }
+}
+
+void get_result_array(int cpid, int job_size, int old, int *sorted) {
+    MPI_Status status;
+
+    if(cpid != MASTER_PROCESS_ID) {
+        MPI_Send(&old, 1, MPI_INT, 0, tag, MPI_COMM_WORLD);
+        return;
+    }
+
+    sorted[0] = old;
+
+    for (int k = 1; k < job_size; k++)
+        MPI_Recv(&sorted[k], 1, MPI_INT, k, tag, MPI_COMM_WORLD, &status);
+}
 
 int main(int argc, char *argv[]) {
-    int i, p, *n = NULL, j, g, s = 0;
-    double start_time, end_time;
+    srand(time(NULL));
+
+    int process_rank;
+    int job_size;
 
     MPI_Status status;
     MPI_Init(&argc, &argv);
-    MPI_Comm_size(MPI_COMM_WORLD, &p);
-    MPI_Comm_rank(MPI_COMM_WORLD, &i);
+    MPI_Comm_size(MPI_COMM_WORLD, &job_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
 
-    /* Manager (rank 0) generates p random numbers */
-    if (i == 0) {
-        n = (int *)calloc(p, sizeof(int));
-        srand(time(NULL));
-        for (j = 0; j < p; j++) {
-            n[j] = rand() % 100;
-        }
+    float start_time;
 
-        if (verbose > 0) {
-            printf("The %d numbers to sort : ", p);
-            for (j = 0; j < p; j++) {
-                printf(" %d", n[j]);
-            }
-            printf("\n");
-            fflush(stdout);
-        }
+    int* array = NULL;
+    int new_number;
+    int sorted_number = 0;
 
-        start_time = MPI_Wtime();
+    if (process_rank == MASTER_PROCESS_ID) {
+        array = (int *)calloc(job_size, sizeof(int));
+
+        for (j = 0; j < job_size; j++)
+            array[js] = rand() % 100;
+
+        start_time = (float) MPI_Wtime();
     }
 
-    /* Each processor i performs p-i steps of comparison and exchange */
-    // This loop structure appears to be part of a sorting network logic
-    for (j = 0; j < p; j++) { // This loop should likely go up to p, not p-i
-        if (i == 0) { // Manager process
-            g = n[j]; // Gets the j-th number
+    for (int i = 0; i < job_size; i++) {
+        if (process_rank == MASTER_PROCESS_ID) {
+            new_number = array[i];
+            pass_next(process_rank, i, &sorted_number, &new_number);
+            continue;
+        }
 
-            if (verbose > 0) {
-                printf("Manager (rank 0) starts with %d for step %d.\n", g, j);
-                fflush(stdout);
-            }
-
-            Compare_and_Send(i, j, &s, &g);
-        } else { // Worker processes
-            // Workers only participate if they are part of the active comparison chain
-            if (j < p - i) { // A condition to prevent reading from non-existent predecessors
-                 MPI_Recv(&g, 1, MPI_INT, i - 1, tag, MPI_COMM_WORLD, &status);
-
-                 if (verbose > 0) {
-                     printf("Node %d receives %d from %d in step %d.\n", i, g, i - 1, j);
-                     fflush(stdout);
-                 }
-
-                 Compare_and_Send(i, j, &s, &g);
-            }
+        if (j < job_size - process_rank) {
+            MPI_Recv(&new_number, i, MPI_INT, process_rank - 1, tag, MPI_COMM_WORLD, &status);
+            pass_next(process_rank, i, &sorted_number, &new_number);
         }
     }
 
-    MPI_Barrier(MPI_COMM_WORLD); /* Synchronize before collecting the final result */
-    Collect_Sorted_Sequence(i, p, s, n);
+    MPI_Barrier(MPI_COMM_WORLD);
 
-    if(i == 0) {
-        end_time = MPI_Wtime();
-        printf("%d %f\n", p, end_time - start_time);
-    }
+    get_result_array(process_rank, job_size, sorted_number, array);
 
-    if (i == 0) {
-        free(n); // Free the allocated memory
+    if(process_rank == MASTER_PROCESS_ID) {
+        float end_time = MPI_Wtime();
+        printf("%d %f\n", job_size, end_time - start_time);
+
+        free(array);
     }
 
     MPI_Finalize();
+
     return 0;
-}
-
-void Compare_and_Send(int myid, int step, int *smaller, int *gotten) {
-    // In the first step (or if a process hasn't held a number yet), it keeps the received number.
-    if (step == 0) {
-        *smaller = *gotten;
-    } else {
-        if (*gotten > *smaller) {
-            // If the received number is greater, send it to the next process
-            MPI_Send(gotten, 1, MPI_INT, myid + 1, tag, MPI_COMM_WORLD);
-            if (verbose > 0) {
-                printf("Node %d keeps %d and sends %d to %d.\n", myid, *smaller, *gotten, myid + 1);
-                fflush(stdout);
-            }
-        } else {
-            // If the received number is smaller, send the old smaller number and keep the new one.
-            MPI_Send(smaller, 1, MPI_INT, myid + 1, tag, MPI_COMM_WORLD);
-            if (verbose > 0) {
-                printf("Node %d sends %d and keeps %d.\n", myid, *smaller, *gotten);
-                fflush(stdout);
-            }
-            *smaller = *gotten;
-        }
-    }
-}
-
-void Collect_Sorted_Sequence(int myid, int p, int smaller, int *sorted) {
-    /* Each processor "myid" sends its final smallest number to the
-     * manager (rank 0), who collects the sorted numbers. */
-    MPI_Status status;
-    int k;
-
-    if (myid == 0) {
-        // The manager already has its smallest number
-        sorted[0] = smaller;
-        // Receive the smallest number from each of the other processes
-        for (k = 1; k < p; k++) {
-            MPI_Recv(&sorted[k], 1, MPI_INT, k, tag, MPI_COMM_WORLD, &status);
-        }
-
-        // printf("\nThe sorted sequence: ");
-        // for (k = 0; k < p; k++) {
-        //     printf(" %d", sorted[k]);
-        // }
-        // printf("\n");
-
-    } else {
-        // All other processes send their final "smaller" value to the manager
-        MPI_Send(&smaller, 1, MPI_INT, 0, tag, MPI_COMM_WORLD);
-    }
 }
