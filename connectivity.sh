@@ -2,7 +2,7 @@
 #SBATCH -p main
 #SBATCH -n256
 module load openmpi
-mpicc -o connectivity connectivity.c
+mpic++ -o connectivity connectivity.cpp
 mpirun -np 1 ./connectivity
 mpirun -np 2 ./connectivity
 mpirun -np 4 ./connectivity
